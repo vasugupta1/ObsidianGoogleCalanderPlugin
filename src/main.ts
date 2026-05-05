@@ -1,7 +1,7 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
+import {App, Notice, Plugin} from 'obsidian';
 import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
-
-// Remember to rename these classes and interfaces!
+import {startOAuthFlow, exchangeCodeForTokens, OAuthConfig} from "./google-oauth";
+import {createEvent, parseEventsFromContent, extractDateFromFilename} from "./google-calendar";
 
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
@@ -9,65 +9,26 @@ export default class MyPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
+		// Google Calendar OAuth command
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
+			id: 'google-calendar-auth',
+			name: 'Connect to Google Calendar',
+			callback: async () => {
+				await this.startOAuthFlow();
 			}
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
+		// Sync daily notes to Google Calendar
+		this.addCommand({
+			id: 'sync-daily-notes',
+			name: 'Sync daily notes to Google Calendar',
+			callback: async () => {
+				await this.syncDailyNotes();
 			}
 		});
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
 	}
 
 	onunload() {
@@ -80,20 +41,132 @@ export default class MyPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
-}
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+	async startOAuthFlow(): Promise<void> {
+		if (!this.settings.client_id) {
+			new Notice('Please enter your Google Client ID in settings first.');
+			return;
+		}
+
+		const config: OAuthConfig = {
+			client_id: this.settings.client_id,
+			client_secret: this.settings.client_secret,
+			redirect_uri: 'urn:ietf:wg:oauth:2.0:oob'
+		};
+
+		try {
+			startOAuthFlow(config);
+			new Notice('Google login page opened. Please authorize and paste the code from the page.');
+		} catch (error) {
+			new Notice('Failed to open Google login. Check console for details.');
+			console.error('OAuth flow error:', error);
+		}
 	}
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
+	async exchangeCodeForTokens(code: string): Promise<any> {
+		if (!this.settings.client_id) {
+			throw new Error('Client ID not configured');
+		}
+
+		console.log('exchangeCodeForTokens called with:');
+		console.log('client_id present:', !!this.settings.client_id);
+		console.log('client_secret present:', !!this.settings.client_secret);
+		console.log('client_secret length:', this.settings.client_secret?.length || 0);
+
+		const config: OAuthConfig = {
+			client_id: this.settings.client_id,
+			client_secret: this.settings.client_secret,
+			redirect_uri: 'urn:ietf:wg:oauth:2.0:oob'
+		};
+
+		return await exchangeCodeForTokens(code, config);
 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+	async syncDailyNotes(): Promise<void> {
+		console.log('Starting syncDailyNotes...');
+		
+		if (!this.settings.oauth_tokens) {
+			console.error('No OAuth tokens found');
+			new Notice('Please authenticate with Google Calendar first.');
+			return;
+		}
+
+		if (!this.settings.dailyNotesPath && !this.settings.calendarId) {
+			console.error('Missing configuration: dailyNotesPath or calendarId');
+			new Notice('Please configure Daily Notes Path and Calendar ID in settings.');
+			return;
+		}
+
+		console.log('Sync configuration:', {
+			dailyNotesPath: this.settings.dailyNotesPath,
+			calendarId: this.settings.calendarId,
+			hasTokens: !!this.settings.oauth_tokens,
+			tokenExpiry: this.settings.oauth_tokens?.expires_at
+		});
+
+		try {
+			const tokens = this.settings.oauth_tokens;
+			const config: OAuthConfig = {
+				client_id: this.settings.client_id,
+				client_secret: this.settings.client_secret,
+				redirect_uri: 'urn:ietf:wg:oauth:2.0:oob'
+			};
+
+			// Get all markdown files
+			const files = this.app.vault.getMarkdownFiles();
+			let syncedCount = 0;
+
+			for (const file of files) {
+				// Check if file is in daily notes path (if specified)
+				if (this.settings.dailyNotesPath) {
+					if (!file.path.startsWith(this.settings.dailyNotesPath)) {
+						continue;
+					}
+				}
+
+				// Extract date from filename
+				const dateStr = extractDateFromFilename(file.name);
+				if (!dateStr) {
+					continue;
+				}
+
+				// Read file content
+				const content = await this.app.vault.read(file);
+				
+				// Parse events from content
+				const events = parseEventsFromContent(content, dateStr);
+				
+				if (events.length === 0) {
+					continue;
+				}
+
+				// Create events in Google Calendar
+				for (const event of events) {
+					try {
+						console.log('Attempting to sync event:', {
+							summary: event.summary,
+							startDateTime: event.startDateTime,
+							endDateTime: event.endDateTime,
+							file: file.path
+						});
+						await createEvent(tokens, config, this.settings.calendarId || 'primary', event);
+						console.log('Successfully created event:', event.summary);
+						syncedCount++;
+					} catch (err) {
+						console.error('Failed to create event:', {
+							event: event.summary,
+							file: file.path,
+							error: err instanceof Error ? err.message : err,
+							stack: err instanceof Error ? err.stack : undefined
+						});
+					}
+				}
+			}
+
+			new Notice(`Synced ${syncedCount} events to Google Calendar.`);
+		} catch (error) {
+			console.error('Sync failed:', error);
+			new Notice('Sync failed. Check console for details.');
+		}
 	}
 }
