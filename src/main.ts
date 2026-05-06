@@ -5,9 +5,12 @@ import {createEvent, parseEventsFromContent, extractDateFromFilename, getEventsF
 
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
+	syncInterval: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
+
+		this.setupAutoSync();
 
 		// Google Calendar OAuth command
 		this.addCommand({
@@ -50,6 +53,9 @@ export default class MyPlugin extends Plugin {
 	}
 
 	onunload() {
+		if (this.syncInterval) {
+			window.clearInterval(this.syncInterval);
+		}
 	}
 
 	async loadSettings() {
@@ -58,6 +64,26 @@ export default class MyPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	setupAutoSync() {
+		if (this.syncInterval) {
+			window.clearInterval(this.syncInterval);
+		}
+
+		if (!this.settings.autoSyncEnabled) {
+			console.log('Auto sync is disabled');
+			return;
+		}
+
+		const minutes = 10;
+		this.syncInterval = window.setInterval(async () => {
+			console.log('Auto-syncing with Google Calendar...');
+			await this.syncTwoWay();
+		}, minutes * 60 * 1000);
+
+		this.registerInterval(this.syncInterval);
+		console.log(`Auto sync enabled - running every ${minutes} minutes`);
 	}
 
 	async startOAuthFlow(): Promise<void> {

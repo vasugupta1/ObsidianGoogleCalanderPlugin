@@ -9,6 +9,7 @@ export interface MyPluginSettings {
 	dailyNotesPath: string;
 	calendarId: string;
 	syncDaysRange: number;
+	autoSyncEnabled: boolean;
 	oauth_tokens?: OAuthTokens;
 }
 
@@ -18,7 +19,8 @@ export const DEFAULT_SETTINGS: MyPluginSettings = {
 	client_secret: '',
 	dailyNotesPath: 'Daily Notes',
 	calendarId: 'primary',
-	syncDaysRange: 30
+	syncDaysRange: 30,
+	autoSyncEnabled: false
 }
 
 export class SampleSettingTab extends PluginSettingTab {
@@ -87,6 +89,17 @@ export class SampleSettingTab extends PluginSettingTab {
 			.onChange(async (value) => {
 				this.plugin.settings.syncDaysRange = parseInt(value) || 30;
 				await this.plugin.saveSettings();
+			}));
+
+	new Setting(containerEl)
+		.setName('Auto Sync')
+		.setDesc('Enable automatic two-way sync')
+		.addToggle(toggle => toggle
+			.setValue(this.plugin.settings.autoSyncEnabled)
+			.onChange(async (value) => {
+				this.plugin.settings.autoSyncEnabled = value;
+				await this.plugin.saveSettings();
+				this.plugin.setupAutoSync();
 			}));
 
 	new Setting(containerEl)

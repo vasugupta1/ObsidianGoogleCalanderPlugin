@@ -226,6 +226,8 @@ export async function getEventsFromGoogleCalendar(
         singleEvents: 'true',
         orderBy: 'startTime'
     });
+    params.append('eventTypes', 'default');
+    params.append('eventTypes', 'fromGmail');
 
     const url = `${CALENDAR_API_BASE}/calendars/${calendarId}/events?${params.toString()}`;
     
