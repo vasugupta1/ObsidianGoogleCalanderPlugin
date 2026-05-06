@@ -11,11 +11,12 @@ export interface CalendarEvent {
     hash?: string;
 }
 
-export function generateEventHash(startDateTime: string, endDateTime: string, summary: string): string {
+export function generateEventHash(startDateTime: string, endDateTime: string, summary: string, dateStr?: string): string {
     const normalizedStart = normalizeTimeForHash(startDateTime);
     const normalizedEnd = normalizeTimeForHash(endDateTime);
     const normalizedSummary = summary.trim().toLowerCase();
-    const hashInput = `${normalizedStart}|${normalizedEnd}|${normalizedSummary}`;
+    const datePart = dateStr || extractDatePart(startDateTime);
+    const hashInput = `${datePart}|${normalizedStart}|${normalizedEnd}|${normalizedSummary}`;
     return hashString(hashInput);
 }
 
@@ -24,6 +25,10 @@ function normalizeTimeForHash(isoString: string): string {
     const hours = date.getHours().toString().padStart(2, '0');
     const minutes = date.getMinutes().toString().padStart(2, '0');
     return `${hours}:${minutes}`;
+}
+
+function extractDatePart(isoString: string): string {
+    return isoString.split('T')[0] ?? '';
 }
 
 function hashString(str: string): string {
@@ -180,7 +185,7 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
             endDateTime: endDate.toISOString()
         });
         
-        const hash = generateEventHash(startDate.toISOString(), endDate.toISOString(), summary);
+        const hash = generateEventHash(startDate.toISOString(), endDate.toISOString(), summary, dateStr);
         console.log('Generated hash:', hash);
         
         events.push({
@@ -309,4 +314,33 @@ export function appendEventsToContent(content: string, events: CalendarEvent[]):
     }
     
     return newContent;
+}
+
+export function getEventsByDateMap(events: CalendarEvent[]): Map<string, CalendarEvent[]> {
+    const map = new Map<string, CalendarEvent[]>();
+    for (const event of events) {
+        const dateStr = new Date(event.startDateTime).toISOString().split('T')[0] ?? '';
+        if (!map.has(dateStr)) {
+            map.set(dateStr, []);
+        }
+        map.get(dateStr)!.push(event);
+    }
+    return map;
+}
+
+export function checkEventTextExists(content: string, event: CalendarEvent): boolean {
+    const eventLine = formatEventForMarkdown(event);
+    return content.includes(eventLine);
+}
+
+export function mergeAndSortEvents(existing: CalendarEvent[], newEvents: CalendarEvent[]): CalendarEvent[] {
+    const allEvents = [...existing, ...newEvents];
+    
+    const uniqueEvents = allEvents.filter((event, index, self) => 
+        index === self.findIndex(e => e.hash === event.hash)
+    );
+    
+    return uniqueEvents.sort((a, b) => 
+        new Date(a.startDateTime).getTime() - new Date(b.startDateTime).getTime()
+    );
 }

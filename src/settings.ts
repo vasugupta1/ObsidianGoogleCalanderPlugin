@@ -8,6 +8,7 @@ export interface MyPluginSettings {
 	client_secret: string;
 	dailyNotesPath: string;
 	calendarId: string;
+	syncDaysRange: number;
 	oauth_tokens?: OAuthTokens;
 }
 
@@ -16,7 +17,8 @@ export const DEFAULT_SETTINGS: MyPluginSettings = {
 	client_id: '',
 	client_secret: '',
 	dailyNotesPath: 'Daily Notes',
-	calendarId: 'primary'
+	calendarId: 'primary',
+	syncDaysRange: 30
 }
 
 export class SampleSettingTab extends PluginSettingTab {
@@ -73,6 +75,17 @@ export class SampleSettingTab extends PluginSettingTab {
 			.setValue(this.plugin.settings.calendarId)
 			.onChange(async (value) => {
 				this.plugin.settings.calendarId = value || 'primary';
+				await this.plugin.saveSettings();
+			}));
+
+	new Setting(containerEl)
+		.setName('Sync Days Range')
+		.setDesc('Number of days to sync from Google Calendar')
+		.addText(text => text
+			.setPlaceholder('30')
+			.setValue(String(this.plugin.settings.syncDaysRange))
+			.onChange(async (value) => {
+				this.plugin.settings.syncDaysRange = parseInt(value) || 30;
 				await this.plugin.saveSettings();
 			}));
 
