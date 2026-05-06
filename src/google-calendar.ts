@@ -8,6 +8,32 @@ export interface CalendarEvent {
     startDateTime: string; // ISO string
     endDateTime: string;   // ISO string
     description?: string;
+    hash?: string;
+}
+
+export function generateEventHash(startDateTime: string, endDateTime: string, summary: string): string {
+    const normalizedStart = normalizeTimeForHash(startDateTime);
+    const normalizedEnd = normalizeTimeForHash(endDateTime);
+    const normalizedSummary = summary.trim().toLowerCase();
+    const hashInput = `${normalizedStart}|${normalizedEnd}|${normalizedSummary}`;
+    return hashString(hashInput);
+}
+
+function normalizeTimeForHash(isoString: string): string {
+    const date = new Date(isoString);
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    return `${hours}:${minutes}`;
+}
+
+function hashString(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return Math.abs(hash).toString(16);
 }
 
 export interface Calendar {
@@ -125,7 +151,6 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
     console.log('Parsing events from content for date:', dateStr);
     console.log('Content length:', content.length);
     
-    // Regex to match time ranges like "09:00 - 10:00 Event name" or "9:00-10:00 Event"
     const timePattern = /(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s+(.+)/g;
     
     let match: RegExpExecArray | null;
@@ -138,14 +163,12 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
         
         console.log(`Found event ${matchCount}:`, { startTime, endTime, summary });
         
-        // Construct ISO datetime strings
         const startDateTimeStr = `${dateStr}T${startTime}:00`;
         const endDateTimeStr = `${dateStr}T${endTime}:00`;
         
         const startDate = new Date(startDateTimeStr);
         const endDate = new Date(endDateTimeStr);
         
-        // Validate dates
         if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
             console.error('Invalid date:', { startDateTimeStr, endDateTimeStr });
             continue;
@@ -157,10 +180,14 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
             endDateTime: endDate.toISOString()
         });
         
+        const hash = generateEventHash(startDate.toISOString(), endDate.toISOString(), summary);
+        console.log('Generated hash:', hash);
+        
         events.push({
             summary,
             startDateTime: startDate.toISOString(),
-            endDateTime: endDate.toISOString()
+            endDateTime: endDate.toISOString(),
+            hash
         });
     }
     
@@ -169,10 +196,117 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
 }
 
 export function extractDateFromFilename(filename: string): string | null {
-    // Match YYYY-MM-DD pattern
     const dateMatch = filename.match(/(\d{4}-\d{2}-\d{2})/);
     if (dateMatch) {
         return dateMatch[1] || null;
     }
     return null;
+}
+
+export async function getEventsFromGoogleCalendar(
+    tokens: OAuthTokens,
+    config: OAuthConfig,
+    calendarId: string,
+    startDate: string,
+    endDate: string
+): Promise<CalendarEvent[]> {
+    if (isTokenExpired(tokens) && tokens.refresh_token) {
+        const newTokens = await refreshAccessToken(tokens.refresh_token, config);
+        tokens = { ...tokens, ...newTokens };
+    }
+
+    const params = new URLSearchParams({
+        timeMin: `${startDate}T00:00:00Z`,
+        timeMax: `${endDate}T23:59:59Z`,
+        singleEvents: 'true',
+        orderBy: 'startTime'
+    });
+
+    const url = `${CALENDAR_API_BASE}/calendars/${calendarId}/events?${params.toString()}`;
+    
+    console.log('Fetching Google Calendar events:', { calendarId, startDate, endDate, url });
+
+    const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+            'Authorization': getAuthHeader(tokens),
+            'Content-Type': 'application/json'
+        }
+    });
+
+    if (response.status !== 200) {
+        const responseText = await response.text();
+        console.error('Failed to get calendar events:', {
+            status: response.status,
+            responseText
+        });
+        throw new Error(`Failed to get calendar events: ${response.status}`);
+    }
+
+    const data = JSON.parse(await response.text());
+    const events: CalendarEvent[] = [];
+
+    if (data.items && data.items.length > 0) {
+        for (const item of data.items) {
+            const startDateTime = item.start?.dateTime || item.start?.date;
+            const endDateTime = item.end?.dateTime || item.end?.date;
+            
+            if (startDateTime && endDateTime) {
+                const hash = generateEventHash(startDateTime, endDateTime, item.summary || '');
+                events.push({
+                    summary: item.summary || '',
+                    startDateTime,
+                    endDateTime,
+                    description: item.description,
+                    hash
+                });
+            }
+        }
+    }
+
+    console.log(`Retrieved ${events.length} events from Google Calendar`);
+    return events;
+}
+
+export function formatEventForMarkdown(event: CalendarEvent): string {
+    const startDate = new Date(event.startDateTime);
+    const endDate = new Date(event.endDateTime);
+    
+    const fromTime = formatTime(startDate);
+    const toTime = formatTime(endDate);
+    
+    return `- [ ] ${fromTime} - ${toTime} ${event.summary}`;
+}
+
+function formatTime(date: Date): string {
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    return `${hours}:${minutes}`;
+}
+
+export function generateDailyNoteFilename(dateStr: string): string {
+    return `${dateStr}.md`;
+}
+
+export function generateDailyNotePath(dailyNotesPath: string, dateStr: string): string {
+    const filename = generateDailyNoteFilename(dateStr);
+    return dailyNotesPath ? `${dailyNotesPath}/${filename}` : filename;
+}
+
+export function appendEventsToContent(content: string, events: CalendarEvent[]): string {
+    const sortedEvents = [...events].sort((a, b) => {
+        return new Date(a.startDateTime).getTime() - new Date(b.startDateTime).getTime();
+    });
+
+    let newContent = content.trim();
+    
+    if (newContent && !newContent.endsWith('\n')) {
+        newContent += '\n';
+    }
+    
+    for (const event of sortedEvents) {
+        newContent += '\n' + formatEventForMarkdown(event);
+    }
+    
+    return newContent;
 }

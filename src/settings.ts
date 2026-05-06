@@ -15,7 +15,7 @@ export const DEFAULT_SETTINGS: MyPluginSettings = {
 	mySetting: 'default',
 	client_id: '',
 	client_secret: '',
-	dailyNotesPath: '',
+	dailyNotesPath: 'Daily Notes',
 	calendarId: 'primary'
 }
 
