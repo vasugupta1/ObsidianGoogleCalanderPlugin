@@ -30,6 +30,7 @@ describe('sync-daily-notes command', () => {
 		(global.fetch as any).mockReset();
 		plugin = new MyPlugin({ vault: mockVault } as any);
 		plugin.settings = {
+			mySetting: 'default',
 			client_id: mockConfig.client_id,
 			client_secret: mockConfig.client_secret,
 			calendarId: 'primary',
@@ -37,6 +38,7 @@ describe('sync-daily-notes command', () => {
 			oauth_tokens: validTokens,
 			autoSyncEnabled: false,
 			syncDaysRange: 30,
+			syncedEventsMap: {},
 		};
 		mockVault.folders.add('daily');
 	});
@@ -122,6 +124,7 @@ describe('sync-from-google-calendar command', () => {
 		(global.fetch as any).mockReset();
 		plugin = new MyPlugin({ vault: mockVault } as any);
 		plugin.settings = {
+			mySetting: 'default',
 			client_id: mockConfig.client_id,
 			client_secret: mockConfig.client_secret,
 			calendarId: 'primary',
@@ -129,6 +132,7 @@ describe('sync-from-google-calendar command', () => {
 			oauth_tokens: validTokens,
 			autoSyncEnabled: false,
 			syncDaysRange: 7,
+			syncedEventsMap: {},
 		};
 	});
 
@@ -220,6 +224,7 @@ describe('two-way-sync command', () => {
 			oauth_tokens: validTokens,
 			autoSyncEnabled: false,
 			syncDaysRange: 7,
+			syncedEventsMap: {},
 		};
 		mockVault.folders.add('daily');
 	});

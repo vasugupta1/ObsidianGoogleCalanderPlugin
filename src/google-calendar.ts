@@ -5,10 +5,13 @@ const CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3';
 
 export interface CalendarEvent {
     summary: string;
-    startDateTime: string; // ISO string
-    endDateTime: string;   // ISO string
+    startDateTime: string;
+    endDateTime: string;
     description?: string;
     hash?: string;
+    syncId?: string;
+    googleEventId?: string;
+    lastModified?: number;
 }
 
 export function generateEventHash(startDateTime: string, endDateTime: string, summary: string, dateStr?: string): string {
@@ -39,6 +42,10 @@ function hashString(str: string): string {
         hash = hash & hash;
     }
     return Math.abs(hash).toString(16);
+}
+
+export function generateSyncId(): string {
+    return `obs_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 export interface Calendar {
@@ -87,9 +94,11 @@ export async function createEvent(
         tokens = { ...tokens, ...newTokens };
     }
 
-    const eventBody = {
+    const syncId = event.syncId || generateSyncId();
+    
+    const eventBody: any = {
         summary: event.summary,
-        description: event.description || '',
+        description: event.description ? `${event.description}\n\n[syncId:${syncId}]` : `[syncId:${syncId}]`,
         start: {
             dateTime: event.startDateTime,
             timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -139,6 +148,82 @@ export async function createEvent(
             throw new Error(`Failed to create event (${response.status}): ${errorDetails}`);
         }
 
+return JSON.parse(responseText);
+    } catch (error: any) {
+        console.error('Full error object:', error);
+        if (error.stack) {
+            console.error('Error stack:', error.stack);
+        }
+         throw error;
+     }
+  }
+
+export async function updateEvent(
+    tokens: OAuthTokens,
+    config: OAuthConfig,
+    calendarId: string,
+    googleEventId: string,
+    event: CalendarEvent
+): Promise<any> {
+    if (isTokenExpired(tokens) && tokens.refresh_token) {
+        const newTokens = await refreshAccessToken(tokens.refresh_token, config);
+        tokens = { ...tokens, ...newTokens };
+    }
+
+    const syncId = event.syncId || generateSyncId();
+    
+    const eventBody: any = {
+        summary: event.summary,
+        description: event.description ? `${event.description}\n\n[syncId:${syncId}]` : `[syncId:${syncId}]`,
+        start: {
+            dateTime: event.startDateTime,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        },
+        end: {
+            dateTime: event.endDateTime,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        }
+    };
+
+    const url = `${CALENDAR_API_BASE}/calendars/${calendarId}/events/${googleEventId}`;
+    
+    console.log('Updating Google Calendar event:', {
+        calendarId,
+        googleEventId,
+        eventBody,
+        url
+    });
+
+    try {
+        const response = await fetch(url, {
+            method: 'PUT',
+            headers: {
+                'Authorization': getAuthHeader(tokens),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(eventBody)
+        });
+
+        const responseText = await response.text();
+        
+        console.log('Google Calendar update response:', {
+            status: response.status,
+            statusText: response.statusText,
+            responseText
+        });
+
+        if (response.status !== 200 && response.status !== 201) {
+            let errorDetails = responseText || 'No response text';
+            try {
+                const parsedError = JSON.parse(responseText);
+                console.error('Google API error details:', parsedError);
+                errorDetails = JSON.stringify(parsedError, null, 2);
+            } catch (e) {
+                // Response is not JSON
+            }
+            throw new Error(`Failed to update event (${response.status}): ${errorDetails}`);
+        }
+
         return JSON.parse(responseText);
     } catch (error: any) {
         console.error('Full error object:', error);
@@ -147,7 +232,7 @@ export async function createEvent(
         }
          throw error;
      }
- }
+  }
 
 
 export function parseEventsFromContent(content: string, dateStr: string): CalendarEvent[] {
@@ -156,7 +241,7 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
     console.log('Parsing events from content for date:', dateStr);
     console.log('Content length:', content.length);
     
-    const timePattern = /(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s+(.+)/g;
+    const timePattern = /(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s+(.+?)(?:\s+\[syncId:([^\]]+)\])?$/gm;
     
     let match: RegExpExecArray | null;
     let matchCount = 0;
@@ -165,8 +250,9 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
         const startTime = (match[1] || '').trim();
         const endTime = (match[2] || '').trim();
         const summary = (match[3] || '').trim();
+        const syncId = match[4] || undefined;
         
-        console.log(`Found event ${matchCount}:`, { startTime, endTime, summary });
+        console.log(`Found event ${matchCount}:`, { startTime, endTime, summary, syncId });
         
         const startDateTimeStr = `${dateStr}T${startTime}:00`;
         const endDateTimeStr = `${dateStr}T${endTime}:00`;
@@ -182,7 +268,8 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
         console.log('Parsed event:', {
             summary,
             startDateTime: startDate.toISOString(),
-            endDateTime: endDate.toISOString()
+            endDateTime: endDate.toISOString(),
+            syncId
         });
         
         const hash = generateEventHash(startDate.toISOString(), endDate.toISOString(), summary, dateStr);
@@ -192,7 +279,8 @@ export function parseEventsFromContent(content: string, dateStr: string): Calend
             summary,
             startDateTime: startDate.toISOString(),
             endDateTime: endDate.toISOString(),
-            hash
+            hash,
+            syncId
         });
     }
     
@@ -259,13 +347,20 @@ export async function getEventsFromGoogleCalendar(
             const endDateTime = item.end?.dateTime || item.end?.date;
             
             if (startDateTime && endDateTime) {
+                const syncIdMatch = item.description?.match(/\[syncId:([^\]]+)\]/);
+                const syncId = syncIdMatch ? syncIdMatch[1] : undefined;
+                
                 const hash = generateEventHash(startDateTime, endDateTime, item.summary || '');
+                
                 events.push({
                     summary: item.summary || '',
                     startDateTime,
                     endDateTime,
                     description: item.description,
-                    hash
+                    hash,
+                    syncId,
+                    googleEventId: item.id,
+                    lastModified: item.updated ? new Date(item.updated).getTime() : undefined
                 });
             }
         }
@@ -275,14 +370,16 @@ export async function getEventsFromGoogleCalendar(
     return events;
 }
 
-export function formatEventForMarkdown(event: CalendarEvent): string {
+export function formatEventForMarkdown(event: CalendarEvent, includeSyncId: boolean = true): string {
     const startDate = new Date(event.startDateTime);
     const endDate = new Date(event.endDateTime);
     
     const fromTime = formatTime(startDate);
     const toTime = formatTime(endDate);
     
-    return `- [ ] ${fromTime} - ${toTime} ${event.summary}`;
+    const syncIdPart = includeSyncId && event.syncId ? ` [syncId:${event.syncId}]` : '';
+    
+    return `- [ ] ${fromTime} - ${toTime} ${event.summary}${syncIdPart}`;
 }
 
 function formatTime(date: Date): string {
