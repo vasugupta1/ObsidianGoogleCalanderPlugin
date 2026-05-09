@@ -2,6 +2,16 @@
 
 A plugin that syncs your Obsidian daily notes with Google Calendar events.
 
+## Recommended Plugins
+
+For the best experience, this plugin works alongside these popular Obsidian plugins:
+
+- **[Calendar](https://github.com/obsidianmd/obsidian-calendar-plugin)** - Creates daily notes automatically and provides a calendar view
+- **[Dataview](https://github.com/blacksmithgu/obsidian-dataview)** - Query and display your daily notes with events
+- **[Day Planner](https://github.com/ivan-lednev/obsidian-day-planner)** - Time-blocking and task management with a visual timeline
+
+These plugins work together to create a powerful daily planning workflow where events sync seamlessly between your daily notes and Google Calendar.
+
 ## Features
 
 - **Two-way sync** - Sync events between Obsidian daily notes and Google Calendar
