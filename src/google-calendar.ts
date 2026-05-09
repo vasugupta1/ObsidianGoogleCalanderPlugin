@@ -82,8 +82,8 @@ export async function createEvent(
     calendarId: string,
     event: CalendarEvent
 ): Promise<any> {
-    if (isTokenExpired(tokens)) {
-        const newTokens = await refreshAccessToken(tokens.refresh_token!, config);
+    if (isTokenExpired(tokens) && tokens.refresh_token) {
+        const newTokens = await refreshAccessToken(tokens.refresh_token, config);
         tokens = { ...tokens, ...newTokens };
     }
 
