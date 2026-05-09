@@ -2,6 +2,12 @@ import {App, Notice, PluginSettingTab, Setting} from "obsidian";
 import MyPlugin from "./main";
 import {OAuthTokens} from "./google-oauth";
 
+export interface SyncedEvent {
+	syncId: string;
+	googleEventId: string;
+	lastSynced: number;
+}
+
 export interface MyPluginSettings {
 	mySetting: string;
 	client_id: string;
@@ -11,6 +17,7 @@ export interface MyPluginSettings {
 	syncDaysRange: number;
 	autoSyncEnabled: boolean;
 	oauth_tokens?: OAuthTokens;
+	syncedEventsMap: Record<string, SyncedEvent>;
 }
 
 export const DEFAULT_SETTINGS: MyPluginSettings = {
@@ -20,7 +27,8 @@ export const DEFAULT_SETTINGS: MyPluginSettings = {
 	dailyNotesPath: 'Daily Notes',
 	calendarId: 'primary',
 	syncDaysRange: 30,
-	autoSyncEnabled: false
+	autoSyncEnabled: false,
+	syncedEventsMap: {}
 }
 
 export class SampleSettingTab extends PluginSettingTab {

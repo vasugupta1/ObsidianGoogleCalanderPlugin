@@ -1,7 +1,7 @@
 import {App, Notice, Plugin, TFile} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab, SyncedEvent} from "./settings";
 import {startOAuthFlow, exchangeCodeForTokens, OAuthConfig} from "./google-oauth";
-import {createEvent, parseEventsFromContent, extractDateFromFilename, getEventsFromGoogleCalendar, generateDailyNotePath, appendEventsToContent, getEventsByDateMap, checkEventTextExists, mergeAndSortEvents, generateEventHash} from "./google-calendar";
+import {createEvent, parseEventsFromContent, extractDateFromFilename, getEventsFromGoogleCalendar, generateDailyNotePath, appendEventsToContent, getEventsByDateMap, checkEventTextExists, mergeAndSortEvents, generateEventHash, updateEvent, generateSyncId, CalendarEvent} from "./google-calendar";
 
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
@@ -392,15 +392,20 @@ export default class MyPlugin extends Plugin {
 			);
 			console.log(`Fetched ${remoteEvents.length} events from Google Calendar`);
 
-			const remoteEventsMap = new Map<string, import('./google-calendar').CalendarEvent>();
+			const remoteEventsBySyncId = new Map<string, CalendarEvent>();
+			const remoteEventsByHash = new Map<string, CalendarEvent>();
 			for (const event of remoteEvents) {
+				if (event.syncId) {
+					remoteEventsBySyncId.set(event.syncId, event);
+				}
 				if (event.hash) {
-					remoteEventsMap.set(event.hash, event);
+					remoteEventsByHash.set(event.hash, event);
 				}
 			}
 
 			console.log('=== PHASE 1: FETCH LOCAL STATE ===');
-			const localEventsMap = new Map<string, import('./google-calendar').CalendarEvent>();
+			const localEventsBySyncId = new Map<string, CalendarEvent>();
+			const localEventsByHash = new Map<string, CalendarEvent>();
 			
 			for (let i = 0; i < syncDaysRange; i++) {
 				const currentDate = new Date(now);
@@ -415,28 +420,58 @@ export default class MyPlugin extends Plugin {
 					const localEvents = parseEventsFromContent(content, dateStr);
 					
 					for (const event of localEvents) {
+						if (event.syncId) {
+							localEventsBySyncId.set(event.syncId, event);
+						}
 						if (event.hash) {
-							localEventsMap.set(event.hash, event);
+							localEventsByHash.set(event.hash, event);
 						}
 					}
 					console.log(`Parsed ${localEvents.length} events from ${dateStr}.md`);
 				}
 			}
-			console.log(`Total local events: ${localEventsMap.size}`);
+			console.log(`Total local events: ${localEventsBySyncId.size} with syncId, ${localEventsByHash.size} total`);
 
 			console.log('=== PHASE 2: RECONCILIATION ===');
-			const pushToGoogle: import('./google-calendar').CalendarEvent[] = [];
-			const pullToLocal: Map<string, import('./google-calendar').CalendarEvent[]> = new Map();
+			const pushToGoogle: { event: CalendarEvent; isUpdate: boolean; googleEventId?: string }[] = [];
+			const pullToLocal: Map<string, CalendarEvent[]> = new Map();
+			const conflicts: { local: CalendarEvent; remote: CalendarEvent }[] = [];
 
-			for (const [hash, localEvent] of localEventsMap) {
-				if (!remoteEventsMap.has(hash)) {
-					pushToGoogle.push(localEvent);
+			for (const [syncId, localEvent] of localEventsBySyncId) {
+				const remoteEvent = remoteEventsBySyncId.get(syncId);
+				
+				if (remoteEvent) {
+					if (localEvent.hash !== remoteEvent.hash) {
+						conflicts.push({ local: localEvent, remote: remoteEvent });
+					}
+				} else if (!remoteEventsByHash.has(localEvent.hash || '')) {
+					const syncedInfo = this.settings.syncedEventsMap[localEvent.hash || ''];
+					pushToGoogle.push({ 
+						event: localEvent, 
+						isUpdate: !!syncedInfo?.googleEventId,
+						googleEventId: syncedInfo?.googleEventId
+					});
 				}
 			}
-			console.log(`Local Only (Push to Google): ${pushToGoogle.length}`);
 
-			for (const [hash, remoteEvent] of remoteEventsMap) {
-				if (!localEventsMap.has(hash)) {
+			for (const [hash, localEvent] of localEventsByHash) {
+				const remoteByHash = remoteEventsByHash.get(hash);
+				const remoteBySyncId = localEvent.syncId ? remoteEventsBySyncId.get(localEvent.syncId) : null;
+				
+				if (!remoteByHash && !remoteBySyncId) {
+					const syncedInfo = this.settings.syncedEventsMap[hash];
+					if (!localEventsBySyncId.has(localEvent.syncId || '')) {
+						pushToGoogle.push({ 
+							event: localEvent, 
+							isUpdate: !!syncedInfo?.googleEventId,
+							googleEventId: syncedInfo?.googleEventId
+						});
+					}
+				}
+			}
+
+			for (const [syncId, remoteEvent] of remoteEventsBySyncId) {
+				if (!localEventsBySyncId.has(syncId)) {
 					const eventDate = new Date(remoteEvent.startDateTime).toISOString().split('T')[0] ?? '';
 					if (!pullToLocal.has(eventDate)) {
 						pullToLocal.set(eventDate, []);
@@ -444,19 +479,75 @@ export default class MyPlugin extends Plugin {
 					pullToLocal.get(eventDate)!.push(remoteEvent);
 				}
 			}
-			console.log(`Remote Only (Pull to Local): ${pullToLocal.size} days with events`);
 
-			console.log('=== PHASE 3: EXECUTION ===');
+			for (const [hash, remoteEvent] of remoteEventsByHash) {
+				if (!localEventsByHash.has(hash)) {
+					const alreadyPulled = remoteEventsBySyncId.has(remoteEvent.syncId || '');
+					if (!alreadyPulled) {
+						const eventDate = new Date(remoteEvent.startDateTime).toISOString().split('T')[0] ?? '';
+						if (!pullToLocal.has(eventDate)) {
+							pullToLocal.set(eventDate, []);
+						}
+						pullToLocal.get(eventDate)!.push(remoteEvent);
+					}
+				}
+			}
+			console.log(`Push to Google: ${pushToGoogle.length} (${pushToGoogle.filter(p => p.isUpdate).length} updates)`);
+			console.log(`Pull to Local: ${pullToLocal.size} days with events`);
+			console.log(`Conflicts: ${conflicts.length}`);
+
+			console.log('=== PHASE 3: CONFLICT RESOLUTION (Last-write-wins) ===');
+			for (const conflict of conflicts) {
+				const localTime = conflict.local.lastModified || 0;
+				const remoteTime = conflict.remote.lastModified || 0;
+				
+				console.log(`Conflict: ${conflict.local.summary} - local: ${localTime}, remote: ${remoteTime}`);
+				
+				if (remoteTime > localTime) {
+					const eventDate = new Date(conflict.remote.startDateTime).toISOString().split('T')[0] ?? '';
+					if (!pullToLocal.has(eventDate)) {
+						pullToLocal.set(eventDate, []);
+					}
+					pullToLocal.get(eventDate)!.push(conflict.remote);
+				} else {
+					const syncedInfo = this.settings.syncedEventsMap[conflict.local.hash || ''];
+					pushToGoogle.push({
+						event: conflict.local,
+						isUpdate: true,
+						googleEventId: syncedInfo?.googleEventId
+					});
+				}
+			}
+
+			console.log('=== PHASE 4: EXECUTION ===');
 			
 			let pushedCount = 0;
 			let pullPushedCount = 0;
 
 			if (pushToGoogle.length > 0) {
 				console.log(`Processing ${pushToGoogle.length} pushes to Google...`);
-				for (const event of pushToGoogle) {
+				for (const { event, isUpdate, googleEventId } of pushToGoogle) {
 					try {
-						await createEvent(tokens, config, calendarId, event);
-						console.log(`Pushed to Google: ${event.summary}`);
+						let eventWithSyncId = event;
+						if (!eventWithSyncId.syncId) {
+							eventWithSyncId = { ...event, syncId: generateSyncId() };
+						}
+						
+						if (isUpdate && googleEventId) {
+							await updateEvent(tokens, config, calendarId, googleEventId, eventWithSyncId);
+							console.log(`Updated in Google: ${eventWithSyncId.summary}`);
+						} else {
+							const result = await createEvent(tokens, config, calendarId, eventWithSyncId);
+							
+							if (eventWithSyncId.hash) {
+								this.settings.syncedEventsMap[eventWithSyncId.hash] = {
+									syncId: eventWithSyncId.syncId!,
+									googleEventId: result.id,
+									lastSynced: Date.now()
+								};
+							}
+							console.log(`Created in Google: ${eventWithSyncId.summary}`);
+						}
 						pushedCount++;
 						
 						await new Promise(resolve => setTimeout(resolve, 50));
@@ -464,6 +555,7 @@ export default class MyPlugin extends Plugin {
 						console.error(`Failed to push event: ${event.summary}`, err);
 					}
 				}
+				await this.saveSettings();
 			}
 
 			if (pullToLocal.size > 0) {
@@ -474,7 +566,7 @@ export default class MyPlugin extends Plugin {
 					const existingFile = this.app.vault.getAbstractFileByPath(dailyNotePath);
 					
 					let existingContent = '';
-					let existingEvents: import('./google-calendar').CalendarEvent[] = [];
+					let existingEvents: CalendarEvent[] = [];
 
 					if (existingFile && (existingFile as TFile).extension) {
 						existingContent = await this.app.vault.read(existingFile as TFile);
@@ -507,7 +599,7 @@ export default class MyPlugin extends Plugin {
 				}
 			}
 
-			console.log('=== PHASE 4: VERIFICATION ===');
+			console.log('=== PHASE 5: VERIFICATION ===');
 			console.log(`Total pushed to Google: ${pushedCount}`);
 			console.log(`Total pulled to local: ${pullPushedCount}`);
 
